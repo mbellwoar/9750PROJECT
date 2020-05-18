@@ -1,0 +1,233 @@
+---
+title: "9750 Project"
+output: html_document
+---
+
+## Car Accident data in the US
+
+The data gathered for our report is information on 3 million isolated car accidents that occurred in the United States.
+
+```{r echo=FALSE, include=FALSE}
+# code comment test
+getwd()
+setwd("C:/Users/matth/OneDrive/Desktop/Applications/project/")
+```
+
+---
+These are the libraries we used 
+---
+```{r warning=FALSE, include=FALSE}
+
+for (pkg in c("gridExtra","hexbin", "tidyverse", "modelr", "lubridate", "glmnet", "leaps", "car","randomForest", "dplyr", "reshape2", "caret", "rmarkdown")) library(pkg, character.only=TRUE)
+
+```
+
+## Data Files
+
+We joined these three files for our analysis. The accidents file is large, it will take a long time
+```{r}
+data <- read.csv("accidentsShort.csv")
+pop <- read.csv("population_by_zip_2010.csv")
+drive <- read.csv("miles_1.csv")
+```
+
+Next we made changes to the data so that we could use it in the joins and in the linear models
+```{r,include=FALSE}
+names(pop)[1] <- "population" 
+names(drive)[1] <- "State"
+
+accidents <- as_tibble(data)
+population <- as_tibble(pop)
+miles <- as_tibble(drive)
+
+precips <- c("Rain", "Snow", "Shower", "Hail", "Ice Pellet", "Sleet", "Drizzle", "Wintry Mix", "Squall")
+precip_math_format = colour_match <- str_c(precips, collapse = "|")
+has_precip <- str_subset(accidents$Weather_Condition, precip_math_format)
+accidents = accidents %>% mutate(precipExist = FALSE)      	
+precipExist  <- grep(precip_math_format,accidents$Weather_Condition )
+accidents[precipExist, "precipExist"]=TRUE
+```
+
+In the original population file the subtotals were displayed on several rows so we had to transform it using pivot to get the totals on one row. After that we join it to the accident data and we also join the average miles driven per state to that table. Next we group the data so that we have a count and we transform it to a log to offset the skew. 
+```{r message=FALSE, warning=FALSE}
+seg_population <- population %>% filter(is.na(maximum_age), is.na(minimum_age), gender == "male" | gender == "female") %>%  
+  pivot_wider(names_from = "gender", values_from = "population") %>%
+  select(zipcode, male, female) %>%
+  mutate(population = male + female)
+
+accidents.population <- accidents %>%
+  mutate(start_hour=hour(strptime(Start_Time, '%Y -%m -%d %H:%M')) %>% as.integer() ) %>%
+  mutate(month=month(strptime(Start_Time, '%Y -%m -%d %H:%M')) %>% as.integer() ) %>%
+  mutate(zcode = substr(Zipcode,1,5)) %>%
+  mutate(zip.code = as.integer(zcode)) %>%
+  mutate(start_hour = as.integer(start_hour)) %>%
+  mutate(month = as.integer(month)) %>%
+  left_join(seg_population, by=c("zip.code" = "zipcode")) %>%
+  left_join(miles, by="State") %>%
+  sample_n(size=100000)
+
+data_group <- accidents.population %>%
+  filter(!is.na(population), !is.na(Visibility.mi.)) %>%
+  group_by(start_hour, month, precipExist, Amenity,  Sunrise_Sunset, 
+           roadDeviceExist,  Miles_per_driver) %>%
+  summarise(n=n()) %>%  
+  mutate(logn = log(n)) 
+
+data_group %>% group_by(n) %>% summarize(count= n()) %>% arrange(desc(count)) %>% slice(1:10)
+
+hist(data_group$n, main = "Count Distribution", xlab = "Count"); 
+hist(log(data_group$n), main = "Log of Count Distribution", xlab = "Log of Count");
+
+```
+
+Now we split the data into test and train for model testing validation
+
+```{r}
+N_TEST <- nrow(data_group)*0.2
+set.seed(1234) 
+r_idx <- sample(1:nrow(data_group))
+data_trn <- data_group %>%
+  slice(r_idx[-(1:N_TEST)])
+data_test <- data_group%>%
+  slice(r_idx[1:N_TEST])
+
+dim(data_trn); dim(data_test)
+
+```
+
+---
+Step 2 - Regression models
+---
+---
+Step 2.1 - Linear Models
+---
+
+```{r}
+fit.lm1 <- lm(logn~start_hour, data=train_group)
+summary(fit.lm1)
+
+fit.lm2 <- lm(logn~ start_hour +  month +  Visibility.mi. +  precipExist +  Amenity +   Sunrise_Sunset +  roadDeviceExist +  population +  Miles_per_driver, data=train_group) 
+summary(fit.lm2)
+
+fit.lm3 <- lm(logn~ ., data=train_group) 
+summary(fit.lm2)
+
+step_scope <- ~ start_hour+month+Visibility.mi.+precipExist+Amenity+Sunrise_Sunset+roadDeviceExist+population+Miles_per_driver
+fit.step <- step(fit.lm1, scope=step_scope, data=train_group, trace=1) 
+```
+
+---
+Step 2.2 - Random Forest
+---
+```{r}
+fit.rf <- randomForest(logn ~ start_hour + Visibility.mi. + precipExist + Amenity + 
+                         Sunrise_Sunset + roadDeviceExist + population + Miles_per_driver,
+                       data=train_group, importance=TRUE, do.trace=10)
+fit.rf
+importance(fit.rf)
+```
+---
+step 2.3 - compare AIC
+---
+```{r}
+AIC(fit.lm1) 
+AIC(fit.lm2) 
+AIC(fit.step) 
+summary(fit.step)
+```
+
+---
+Step 2.4 - compare residuals 
+---
+
+```{r}
+mod_resid_1 <- train_group %>% add_residuals((fit.lm1), var="resid_1")
+mod_resid_2 <- train_group %>% add_residuals((fit.lm2), var="resid_2")
+mod_resid_step <- train_group %>% add_residuals((fit.step), var="resid_step") 
+mod_resid_rf <- train_group %>% add_residuals((fit.rf), var="resid_rf")
+```
+
+---
+Step 2.5 - plot residuals
+---
+
+```{r}
+par(mfrow=c(2,2))
+
+plot(mod_resid_1$resid_1, main="fit.lm1")
+plot(mod_resid_2$resid_2, main="fit.lm2")
+plot(mod_resid_step$resid_step, main="step")
+plot(mod_resid_rf$resid_rf, main="rf")
+```
+
+---
+histograms of residuals 
+---
+
+```{r}
+hist(residuals(fit.lm1), xlim=c(-10,10),breaks=100, main="lm.fit1")
+hist(residuals(fit.lm2), xlim=c(-10,10),breaks=100, main="lm.fit2")
+hist(residuals(fit.step), xlim=c(-10,10),breaks=100, main="step")
+hist(residuals(fit.rf), xlim=c(-10,10),breaks=100, main="rf")
+```
+
+---
+PART 3 - predictions
+group the test data to match train data
+---
+
+```{r}
+mod_pred_1 <- data_test %>% 
+  add_residuals(fit.lm1, var="resid_test_1") %>%
+  add_predictions(fit.lm1, var="pred_1")
+
+mod_pred_2 <- data_test %>% 
+  add_residuals(fit.lm2, var="resid_test_2") %>%
+  add_predictions(fit.lm2, var="pred_2")
+
+mod_pred_step <- data_test %>% 
+  add_residuals(fit.step, var="resid_test_step") %>%
+  add_predictions(fit.step, var="pred_step")
+
+mod_pred_rf <- data_test %>% 
+  add_residuals(fit.rf, var="resid_test_rf") %>%
+  add_predictions(fit.rf, var="pred_rf")
+```
+---
+compare sum of Squares
+---
+
+```{r}
+sum(mod_pred_1$resid_test_1^2)
+sum(mod_pred_2$resid_test_2^2)
+sum(mod_pred_step$resid_test_step1^2)
+sum(mod_pred_rf$resid_test_rf^2)
+```
+
+---
+select best model.
+plot predictions and real data together
+---
+
+---
+Step 2.5 Compare Sum of Squares
+Add Residuals
+---
+```{r}
+data_group1 <- add_residuals(data_group1,lm.fit1, var="resid_lm1") 
+
+data_train <- add_residuals(data_train, lm.fit2, var="resid_lm2")   #Error in response(model, data) - stats::predict(model, data) : non-numeric argument to binary operator
+
+data_train <- add_residuals(data_train, fit._step, var="resid_step3")#Error in response(model, data) - stats::predict(model, data) : non-numeric argument to binary operator
+
+data_train <- add_residuals(data_train, data_rf, var="resid_rf4")
+```
+---
+Calculate Sum of Squares
+---
+```{r}
+sum(data_group1$resid_lm1^2)
+sum(data_train$resid_lm2^2)
+sum(data_train$resid_step3^2)
+sum(data_train$resid_rf4^2)
+```
