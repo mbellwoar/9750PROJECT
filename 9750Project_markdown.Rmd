@@ -49,6 +49,7 @@ accidents[precipExist, "precipExist"]=TRUE
 ```
 
 In the original population file the subtotals were displayed on several rows so we had to transform it using pivot to get the totals on one row. After that we join it to the accident data and we also join the average miles driven per state to that table. Next we group the data so that we have a count and we transform it to a log to offset the skew. 
+
 ```{r message=FALSE, warning=FALSE}
 seg_population <- population %>% filter(is.na(maximum_age), is.na(minimum_age), gender == "male" | gender == "female") %>%  
   pivot_wider(names_from = "gender", values_from = "population") %>%
@@ -63,35 +64,65 @@ accidents.population <- accidents %>%
   mutate(start_hour = as.integer(start_hour)) %>%
   mutate(month = as.integer(month)) %>%
   left_join(seg_population, by=c("zip.code" = "zipcode")) %>%
-  left_join(miles, by="State") %>%
-  sample_n(size=100000)
+  left_join(miles, by="State") 
 
 data_group <- accidents.population %>%
   filter(!is.na(population), !is.na(Visibility.mi.)) %>%
-  group_by(start_hour, month, precipExist, Amenity,  Sunrise_Sunset, 
-           roadDeviceExist,  Miles_per_driver) %>%
+  group_by(start_hour, month, Visibility.mi., precipExist, Amenity,  Sunrise_Sunset, 
+           roadDeviceExist, population, Miles_per_driver) %>%
   summarise(n=n()) %>%  
   mutate(logn = log(n)) 
 
-data_group %>% group_by(n) %>% summarize(count= n()) %>% arrange(desc(count)) %>% slice(1:10)
+dim(accidents.population);dim(data_group)
 
-hist(data_group$n, main = "Count Distribution", xlab = "Count"); 
-hist(log(data_group$n), main = "Log of Count Distribution", xlab = "Log of Count");
+data_group %>% group_by(n) %>% summarize(count= n()) %>% arrange(desc(count)) %>% slice(1:20)
+
+ggplot(data = data_group, aes(data_group$n)) +
+  geom_histogram() + 
+  coord_cartesian(xlim = c(0, 15)) +
+  labs(title="Distribution of Count", x = "Count", y = "Frequency") + 
+  theme(plot.title = element_text(hjust = 0.5, size=12),
+        axis.text.y = element_text(size = 9),
+        axis.text.x = element_text(size = 9));
+
+ggplot(data = data_group, aes(data_group$logn)) +
+  geom_histogram() + 
+  coord_cartesian(xlim = c(0, 4)) +
+  labs(title="Distribution of Log of Count", x = "Count", y = "Frequency") + 
+  theme(plot.title = element_text(hjust = 0.5, size=12),
+        axis.text.y = element_text(size = 9),
+        axis.text.x = element_text(size = 9));
+
 
 ```
 
 Now we split the data into test and train for model testing validation
 
 ```{r}
-N_TEST <- nrow(data_group)*0.2
+N_TEST <- nrow(accidents.population)*0.2
 set.seed(1234) 
-r_idx <- sample(1:nrow(data_group))
-data_trn <- data_group %>%
+r_idx <- sample(1:nrow(accidents.population))
+data_trn <- accidents.population %>%
   slice(r_idx[-(1:N_TEST)])
-data_test <- data_group%>%
+data_test <- accidents.population%>%
   slice(r_idx[1:N_TEST])
 
-dim(data_trn); dim(data_test)
+train_group <- data_trn %>%
+  filter(!is.na(population), !is.na(Visibility.mi.)) %>%
+  group_by(start_hour, month, Visibility.mi., precipExist, Amenity,  Sunrise_Sunset, 
+           roadDeviceExist, population, Miles_per_driver) %>%
+  summarise(n=n()) %>%  
+  mutate(logn = log(n)) 
+
+test_group <- data_test %>%
+  filter(!is.na(population), !is.na(Visibility.mi.)) %>%
+  group_by(start_hour, month, Visibility.mi., precipExist, Amenity,  Sunrise_Sunset, 
+           roadDeviceExist, population, Miles_per_driver) %>%
+  summarise(n=n()) %>%  
+  mutate(logn = log(n)) 
+
+dim(train_group); dim(test_group)
+
 
 ```
 
